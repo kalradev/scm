@@ -21,6 +21,7 @@ import {
   countUsers,
   createLocalUser,
   deleteLocalUser,
+  ensureDevUserForRole,
   getLocalUserById,
   getLocalUserByUsername,
   listLocalUserRecords,
@@ -33,8 +34,15 @@ import {
   extractVendorPartyWithOpenAI,
   openaiPartyExtractAvailable,
 } from './openaiPartyExtract'
+import { databaseConfigured, initDatabase } from './db/pool'
+import {
+  deleteWorkflowQuote,
+  listAllWorkflowQuotes,
+  syncWorkflowQuotes,
+  type WorkflowQuoteRow,
+} from './workflowQuotesStore'
 
-const PORT = Number(process.env.PORT ?? 3001)
+const PORT = Number(process.env.PORT ?? 3002)
 
 const ROLES: StoredRole[] = ['sales', 'finance', 'scm', 'admin']
 
@@ -96,8 +104,9 @@ const app = express()
 app.use(cors({ origin: true, credentials: true }))
 app.use(express.json({ limit: '1mb' }))
 
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true })
+app.get('/api/health', async (_req, res) => {
+  const dbReady = databaseConfigured() && Boolean(await initDatabase())
+  res.json({ ok: true, database: dbReady })
 })
 
 /* --- Local username/password auth (no Azure) --- */
@@ -222,6 +231,38 @@ app.post('/api/auth/local/login', async (req, res) => {
   } catch (e) {
     console.error('[api/auth/local/login]', e)
     res.status(500).json({ error: 'login_failed' })
+  }
+})
+
+/** Dev/demo: sign in as a role without a password (local auth only). */
+app.post('/api/auth/local/dev-switch', async (req, res) => {
+  try {
+    const body = req.body as { role?: string }
+    const role = body.role
+    if (
+      role !== 'sales' &&
+      role !== 'finance' &&
+      role !== 'scm' &&
+      role !== 'admin'
+    ) {
+      res.status(400).json({ error: 'invalid_role' })
+      return
+    }
+    const row = await ensureDevUserForRole(role)
+    const token = await signLocalSession(row.id, row.role)
+    res.json({
+      token,
+      user: {
+        displayName: row.displayName,
+        email: row.email || '—',
+        oid: row.id,
+        role: row.role,
+        isAdmin: row.role === 'admin',
+      },
+    })
+  } catch (e) {
+    console.error('[api/auth/local/dev-switch]', e)
+    res.status(500).json({ error: 'dev_switch_failed' })
   }
 })
 
@@ -572,12 +613,131 @@ app.get('/api/admin/quotes', async (req, res) => {
   }
 })
 
+/* --- Workflow quotes (PostgreSQL) — replaces browser localStorage --- */
+
+function isWorkflowQuoteRow(value: unknown): value is WorkflowQuoteRow {
+  if (!value || typeof value !== 'object') return false
+  const r = value as WorkflowQuoteRow
+  return (
+    typeof r.id === 'string' &&
+    typeof r.savedAt === 'string' &&
+    typeof r.savedBy === 'string' &&
+    typeof r.quoteRef === 'string' &&
+    r.formSnapshot !== undefined &&
+    r.formSnapshot !== null
+  )
+}
+
+app.get('/api/workflow/quotes/status', async (_req, res) => {
+  if (!databaseConfigured()) {
+    res.json({ enabled: false })
+    return
+  }
+  const ready = await initDatabase()
+  res.json({ enabled: ready })
+})
+
+app.get('/api/workflow/quotes', async (req, res) => {
+  const auth = await resolveBearerAuth(req)
+  if (!auth.ok) {
+    res.status(auth.status).json({ error: auth.error })
+    return
+  }
+  if (!databaseConfigured()) {
+    res.status(503).json({ error: 'database_not_configured' })
+    return
+  }
+  const ready = await initDatabase()
+  if (!ready) {
+    res.status(503).json({ error: 'database_unavailable' })
+    return
+  }
+  try {
+    const quotes = await listAllWorkflowQuotes()
+    res.json({ quotes })
+  } catch (e) {
+    console.error('[api/workflow/quotes GET]', e)
+    res.status(500).json({ error: 'list_failed' })
+  }
+})
+
+app.post(
+  '/api/workflow/quotes/sync',
+  express.json({ limit: '100mb' }),
+  async (req, res) => {
+    const auth = await resolveBearerAuth(req)
+    if (!auth.ok) {
+      res.status(auth.status).json({ error: auth.error })
+      return
+    }
+    if (!databaseConfigured()) {
+      res.status(503).json({ error: 'database_not_configured' })
+      return
+    }
+    const ready = await initDatabase()
+    if (!ready) {
+      res.status(503).json({ error: 'database_unavailable' })
+      return
+    }
+    const body = req.body as { quotes?: unknown }
+    if (!Array.isArray(body.quotes)) {
+      res.status(400).json({ error: 'invalid_body' })
+      return
+    }
+    const quotes = body.quotes.filter(isWorkflowQuoteRow)
+    try {
+      await syncWorkflowQuotes(quotes)
+      res.json({ ok: true, count: quotes.length })
+    } catch (e) {
+      console.error('[api/workflow/quotes/sync POST]', e)
+      res.status(500).json({ error: 'sync_failed' })
+    }
+  },
+)
+
+app.delete('/api/workflow/quotes/:id', async (req, res) => {
+  const auth = await resolveBearerAuth(req)
+  if (!auth.ok) {
+    res.status(auth.status).json({ error: auth.error })
+    return
+  }
+  if (!databaseConfigured()) {
+    res.status(503).json({ error: 'database_not_configured' })
+    return
+  }
+  const ready = await initDatabase()
+  if (!ready) {
+    res.status(503).json({ error: 'database_unavailable' })
+    return
+  }
+  const id = typeof req.params.id === 'string' ? req.params.id.trim() : ''
+  if (!id) {
+    res.status(400).json({ error: 'invalid_id' })
+    return
+  }
+  try {
+    const removed = await deleteWorkflowQuote(id)
+    res.json({ ok: true, removed })
+  } catch (e) {
+    console.error('[api/workflow/quotes DELETE]', e)
+    res.status(500).json({ error: 'delete_failed' })
+  }
+})
+
 void maybeSeedAdminFromEnv()
   .catch((e) => {
     console.error('[local-auth] seed failed', e)
   })
-  .finally(() => {
+  .finally(async () => {
+    if (databaseConfigured()) {
+      await initDatabase()
+    }
     app.listen(PORT, () => {
       console.log(`[api] http://localhost:${PORT}`)
+      if (databaseConfigured()) {
+        console.log('[db] DATABASE_URL is set — quotes persist to PostgreSQL')
+      } else {
+        console.log('[db] DATABASE_URL not set — quotes stay in browser localStorage')
+      }
     })
   })

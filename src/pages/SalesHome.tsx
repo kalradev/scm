@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type DragEvent,
 } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
@@ -30,6 +31,7 @@ import {
   effectivePoFinanceStatus,
   effectiveQuoteFinanceStatus,
   invoicePipelineNoticeForSales,
+  isSalesFinanceRejectedQuote,
   salesEyePreviewPrefersOvf,
   salesOvfWorkflowAfterPoGate,
   usesInvoiceQuotePipeline,
@@ -40,6 +42,7 @@ import {
   listSavedQuotesForUser,
   mergeQuoteFinanceReviewOnRecord,
   SAVED_QUOTES_LOCAL_STORAGE_KEY,
+  SAVED_QUOTES_UPDATED_EVENT,
   setCustomerQuoteShipmentOnRecord,
   submitMatchedPoToFinanceForRecord,
   updateSavedQuoteFormSnapshotByRecordId,
@@ -48,24 +51,26 @@ import {
 import { formatQuoteDateDisplay } from '../lib/senderAddresses'
 import shareIconPng from '../assets/share-icon.png'
 
-type SalesQuoteListFilter = 'all' | 'drafts' | 'finals' | 'poMatched'
+type SalesQuoteListFilter = 'all' | 'finals' | 'poMatched' | 'rejected'
 
 function quoteStats(rows: SavedQuoteRecord[]) {
   let drafts = 0
   let finals = 0
   let poMatched = 0
+  let rejected = 0
   for (const row of rows) {
     if (isQuoteDraft(row)) {
       drafts += 1
       continue
     }
     finals += 1
+    if (isSalesFinanceRejectedQuote(row)) rejected += 1
     const form = normalizeQuoteFormData(
       row.formSnapshot as QuoteFormData & { customerTitle?: string },
     )
     if (poMatchLabel(form, row.po) === 'matched') poMatched += 1
   }
-  return { drafts, finals, poMatched, total: rows.length }
+  return { drafts, finals, poMatched, rejected, total: finals }
 }
 
 async function downloadQuotePdf(record: SavedQuoteRecord) {
@@ -79,7 +84,11 @@ async function downloadQuotePdf(record: SavedQuoteRecord) {
 const DELETE_DRAFT_NOTICE =
   'Delete this draft permanently?\n\nThis cannot be undone. Other drafts and finalized quotes are not affected.'
 
-function SalesStatIcon({ name }: { name: 'total' | 'draft' | 'final' | 'match' }) {
+function SalesStatIcon({
+  name,
+}: {
+  name: 'total' | 'draft' | 'final' | 'match' | 'rejected'
+}) {
   const p = {
     className: 'sales-dashboard__stat-icon-svg',
     viewBox: '0 0 24 24',
@@ -126,6 +135,16 @@ function SalesStatIcon({ name }: { name: 'total' | 'draft' | 'final' | 'match' }
             strokeLinecap="round"
             strokeLinejoin="round"
             d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622.621-.621A4.5 4.5 0 0017.218 4.5l-4.5 4.5a4.5 4.5 0 01-6.364 0l-.621-.621m-2.485-2.484l-.621-.621A4.5 4.5 0 004.5 8.25l4.5 4.5a4.5 4.5 0 006.364 0l.621-.621"
+          />
+        </svg>
+      )
+    case 'rejected':
+      return (
+        <svg {...p}>
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
           />
         </svg>
       )
@@ -946,6 +965,20 @@ export function SalesHome() {
   const [shareTarget, setShareTarget] = useState<SavedQuoteRecord | null>(null)
   const [eyeModal, setEyeModal] = useState<EyePreviewOpen | null>(null)
   const [quoteListFilter, setQuoteListFilter] = useState<SalesQuoteListFilter>('all')
+  const [invoiceDragOver, setInvoiceDragOver] = useState(false)
+
+  const onInvoiceDrop = useCallback(
+    (e: DragEvent) => {
+      e.preventDefault()
+      setInvoiceDragOver(false)
+      const file = e.dataTransfer.files?.[0] ?? null
+      if (!file) return
+      navigate('/sales/quote/from-invoice', {
+        state: { pendingInvoiceFile: file },
+      })
+    },
+    [navigate],
+  )
 
   const savedQuotes = useMemo(() => {
     if (!user) return []
@@ -953,17 +986,24 @@ export function SalesHome() {
   }, [user, listVersion])
 
   const displayedQuotes = useMemo(() => {
-    if (quoteListFilter === 'all') return savedQuotes
-    if (quoteListFilter === 'drafts') return savedQuotes.filter(isQuoteDraft)
-    if (quoteListFilter === 'finals') return savedQuotes.filter((r) => !isQuoteDraft(r))
-    return savedQuotes.filter((r) => {
-      if (isQuoteDraft(r)) return false
+    const finalized = savedQuotes.filter((r) => !isQuoteDraft(r))
+    if (quoteListFilter === 'all') return finalized
+    if (quoteListFilter === 'finals') return finalized
+    if (quoteListFilter === 'rejected') {
+      return finalized.filter(isSalesFinanceRejectedQuote)
+    }
+    return finalized.filter((r) => {
       const form = normalizeQuoteFormData(
         r.formSnapshot as QuoteFormData & { customerTitle?: string },
       )
       return poMatchLabel(form, r.po) === 'matched'
     })
   }, [savedQuotes, quoteListFilter])
+
+  const finalizedCount = useMemo(
+    () => savedQuotes.filter((r) => !isQuoteDraft(r)).length,
+    [savedQuotes],
+  )
 
   const stats = useMemo(() => quoteStats(savedQuotes), [savedQuotes])
 
@@ -976,8 +1016,13 @@ export function SalesHome() {
     const onStorage = (e: StorageEvent) => {
       if (e.key === SAVED_QUOTES_LOCAL_STORAGE_KEY) refreshList()
     }
+    const onUpdated = () => refreshList()
     window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
+    window.addEventListener(SAVED_QUOTES_UPDATED_EVENT, onUpdated)
+    return () => {
+      window.removeEventListener('storage', onStorage)
+      window.removeEventListener(SAVED_QUOTES_UPDATED_EVENT, onUpdated)
+    }
   }, [refreshList])
 
   /** Re-parse attached supplier invoices to fill vendor unit rates on quotes pending Finance. */
@@ -1108,20 +1153,6 @@ export function SalesHome() {
         </button>
         <button
           type="button"
-          className={`sales-dashboard__stat sales-dashboard__stat--draft${quoteListFilter === 'drafts' ? ' sales-dashboard__stat--active' : ''}`}
-          aria-pressed={quoteListFilter === 'drafts'}
-          onClick={() => setQuoteListFilter('drafts')}
-        >
-          <span className="sales-dashboard__stat-icon">
-            <SalesStatIcon name="draft" />
-          </span>
-          <div className="sales-dashboard__stat-text">
-            <span className="sales-dashboard__stat-value">{stats.drafts}</span>
-            <span className="sales-dashboard__stat-label">Drafts</span>
-          </div>
-        </button>
-        <button
-          type="button"
           className={`sales-dashboard__stat sales-dashboard__stat--final${quoteListFilter === 'finals' ? ' sales-dashboard__stat--active' : ''}`}
           aria-pressed={quoteListFilter === 'finals'}
           onClick={() => setQuoteListFilter('finals')}
@@ -1148,27 +1179,75 @@ export function SalesHome() {
             <span className="sales-dashboard__stat-label">PO matched</span>
           </div>
         </button>
+        <button
+          type="button"
+          className={`sales-dashboard__stat sales-dashboard__stat--rejected${quoteListFilter === 'rejected' ? ' sales-dashboard__stat--active' : ''}`}
+          aria-pressed={quoteListFilter === 'rejected'}
+          onClick={() => setQuoteListFilter('rejected')}
+        >
+          <span className="sales-dashboard__stat-icon">
+            <SalesStatIcon name="rejected" />
+          </span>
+          <div className="sales-dashboard__stat-text">
+            <span className="sales-dashboard__stat-value">{stats.rejected}</span>
+            <span className="sales-dashboard__stat-label">Rejected</span>
+          </div>
+        </button>
       </div>
 
       <div
         className={
           'sales-dashboard__quotes-block' +
-          (savedQuotes.length === 0 ? ' sales-dashboard__quotes-block--empty' : '')
+          (finalizedCount === 0 ? ' sales-dashboard__quotes-block--empty' : '')
         }
       >
         <div className="sales-dashboard__quotes-head">
           <h3 className="sales-dashboard__section-title" id="sales-quotes-heading">
             Quotes
           </h3>
+          {stats.drafts > 0 ? (
+            <Link to="/sales/drafts" className="sales-dashboard__drafts-link">
+              {stats.drafts} draft{stats.drafts === 1 ? '' : 's'} in sidebar →
+            </Link>
+          ) : null}
         </div>
 
-      {savedQuotes.length === 0 ? (
+      {finalizedCount === 0 ? (
         <div
           className="sales-dashboard__quotes-empty"
           role="region"
           aria-labelledby="sales-quotes-heading"
         >
-          <div className="sales-dashboard__empty-card">
+          <div
+            className={
+              'sales-dashboard__empty-card' +
+              (invoiceDragOver ? ' sales-dashboard__empty-card--drag' : '')
+            }
+            onDragEnter={(e) => {
+              e.preventDefault()
+              setInvoiceDragOver(true)
+            }}
+            onDragOver={(e) => {
+              e.preventDefault()
+              setInvoiceDragOver(true)
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault()
+              if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                setInvoiceDragOver(false)
+              }
+            }}
+            onDrop={onInvoiceDrop}
+          >
+            {stats.drafts > 0 ? (
+              <p className="muted sales-dashboard__empty-draft-hint">
+                You have {stats.drafts} draft{stats.drafts === 1 ? '' : 's'} in the
+                sidebar. Finalized quotes will appear here.
+              </p>
+            ) : null}
+            <p className="sales-dashboard__empty-drop-hint muted">
+              Drop an invoice here or use the button below
+            </p>
             <Link
               to="/sales/quote/from-invoice"
               className="btn btn-primary sales-dashboard__empty-cta"

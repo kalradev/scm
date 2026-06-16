@@ -61,13 +61,95 @@ function parseMoneyToken(raw: string): number {
   return Number.isFinite(n) ? n : NaN
 }
 
+/** Row index only — not a product name (`1`, `1.`, `02)`, etc.). */
+function isRowSerialToken(token: string): boolean {
+  return /^\d{1,4}[.)]?$/.test(token.trim())
+}
+
+function stripLeadingRowSerial(text: string): string {
+  return String(text ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\d{1,4}[.)]\s*/, '')
+}
+
+function isWeakProductName(name: string): boolean {
+  const s = name.trim()
+  if (!s || s.length < 2) return true
+  if (isRowSerialToken(s)) return true
+  if (/^#?\d+[.)]?$/.test(s)) return true
+  if (!/[a-zA-Z]/.test(s)) return true
+  return false
+}
+
+/** Short heading from a line description (never a bare row number). */
+function extractProductHeading(description: string): string {
+  const desc = stripLeadingRowSerial(description).trim()
+  if (!desc) return 'Item'
+
+  const commaIdx = desc.indexOf(',')
+  if (commaIdx >= 10) {
+    const head = desc.slice(0, commaIdx).trim()
+    if (!isWeakProductName(head)) return head.slice(0, 120)
+  }
+
+  const words = desc.split(/\s+/).filter(Boolean)
+  let start = 0
+  while (start < words.length && isRowSerialToken(words[start]!)) start += 1
+
+  const meaningful = words.slice(start)
+  if (meaningful.length === 0) return 'Item'
+
+  const stopWords = new Set(['for', 'with', 'except', 'including', 'and', 'or'])
+  let end = Math.min(6, meaningful.length)
+  for (let i = 4; i < Math.min(10, meaningful.length); i++) {
+    if (stopWords.has(meaningful[i]!.toLowerCase())) {
+      end = i
+      break
+    }
+  }
+  if (end < 3) end = Math.min(6, meaningful.length)
+
+  const product = meaningful.slice(0, end).join(' ')
+  if (!isWeakProductName(product)) return product.slice(0, 120)
+
+  const fallback = meaningful.slice(0, Math.min(8, meaningful.length)).join(' ')
+  return isWeakProductName(fallback) ? 'Item' : fallback.slice(0, 120)
+}
+
+function deriveProductAndDescription(raw: string): { product: string; description: string } {
+  const cleaned = stripLeadingRowSerial(raw) || raw.trim()
+  const description = cleaned.slice(0, 500)
+  const product = extractProductHeading(raw)
+  return {
+    product: product || 'Item',
+    description: description || product,
+  }
+}
+
+function normalizeExtractedLineProduct(line: ExtractedInvoiceLine): ExtractedInvoiceLine {
+  const rawDesc = (line.description || line.product || '').trim()
+  const description = (stripLeadingRowSerial(rawDesc) || rawDesc).slice(0, 500)
+  let product = line.product.trim()
+
+  if (isWeakProductName(product)) {
+    product = extractProductHeading(rawDesc)
+  }
+
+  if (!product || isWeakProductName(product)) {
+    const derived = deriveProductAndDescription(rawDesc)
+    product = derived.product
+  }
+
+  return {
+    ...line,
+    product: product.slice(0, 200) || 'Item',
+    description: description || product.slice(0, 500),
+  }
+}
+
 function splitFirstTokenAsProduct(text: string): { product: string; description: string } {
-  const t = String(text ?? '').replace(/\s+/g, ' ').trim()
-  const tokens = t.split(/\s+/).filter(Boolean)
-  if (tokens.length === 0) return { product: '', description: '' }
-  const product = tokens[0].slice(0, 120)
-  const description = (tokens.slice(1).join(' ').trim() || tokens[0]).slice(0, 500)
-  return { product, description }
+  return deriveProductAndDescription(text)
 }
 
 /**
@@ -162,7 +244,7 @@ function tryParseTrailingThreeNumberInvoiceRow(raw: string): ExtractedInvoiceLin
       ? String(Math.round(unit))
       : String(Number(unit.toFixed(4)))
 
-  const split = splitFirstTokenAsProduct(desc)
+  const split = deriveProductAndDescription(desc)
   return {
     product: split.product || 'Item',
     description: split.description || desc.slice(0, 500),
@@ -313,15 +395,10 @@ function extractFromSpreadsheet(buf: ArrayBuffer): ExtractedInvoiceLine[] {
 
       if (!description && productName) {
         description = productName
-        productName = description.split(/\s+/).slice(0, 4).join(' ') || 'Item'
       }
       if (!description && !productName) continue
-      if (!productName) productName = description.slice(0, 60) || 'Item'
 
-      if (sr >= 0) {
-        const s = normalizeCell(row[sr])
-        if (/^\d+$/.test(s) && !description && !productName) continue
-      }
+      const derived = deriveProductAndDescription(description || productName)
 
       let vendorUnitPrice: string | undefined
       if (rate >= 0 && row[rate] !== undefined) {
@@ -335,12 +412,19 @@ function extractFromSpreadsheet(buf: ArrayBuffer): ExtractedInvoiceLine[] {
         }
       }
 
-      sheetOut.push({
-        product: productName.slice(0, 200),
-        description: (description || productName).slice(0, 500),
+      const normalized = normalizeExtractedLineProduct({
+        product: derived.product,
+        description: derived.description,
         qty: qtyStr,
         ...(vendorUnitPrice ? { vendorUnitPrice } : {}),
       })
+
+      if (sr >= 0) {
+        const s = normalizeCell(row[sr])
+        if (/^\d+$/.test(s) && !normalized.description && !normalized.product) continue
+      }
+
+      sheetOut.push(normalized)
     }
 
     if (sheetOut.length) return sheetOut
@@ -484,9 +568,10 @@ function parseInvoiceLinesFromTextLines(allLines: string[]): ExtractedInvoiceLin
       const text = mEndQty[2].trim()
       const q = parseQtyCell(mEndQty[3])
       if (q && text.length >= 2 && !/^(total|page|of)\b/i.test(text)) {
+        const derived = deriveProductAndDescription(text)
         out.push({
-          product: text.split(/\s+/).slice(0, 5).join(' ').slice(0, 120) || 'Item',
-          description: text.slice(0, 500),
+          product: derived.product,
+          description: derived.description,
           qty: q,
         })
       }
@@ -505,9 +590,10 @@ function parseInvoiceLinesFromTextLines(allLines: string[]): ExtractedInvoiceLin
         }
         const text = textParts.join(' ').trim()
         if (text.length >= 3) {
+          const derived = deriveProductAndDescription(text)
           out.push({
-            product: text.split(/\s+/).slice(0, 5).join(' ').slice(0, 120) || 'Item',
-            description: text.slice(0, 500),
+            product: derived.product,
+            description: derived.description,
             qty: q,
           })
         }
@@ -833,7 +919,9 @@ export async function extractInvoiceLineItemsFromFile(
       lines = await extractFromImage(buf, file.type || 'image/jpeg', options?.onOcrProgress)
     }
 
-    lines = dedupeLines(lines.filter((L) => L.description.trim() || L.product.trim()))
+    lines = dedupeLines(lines.filter((L) => L.description.trim() || L.product.trim())).map(
+      normalizeExtractedLineProduct,
+    )
 
     if (lines.length === 0) {
       const sheetMsg =

@@ -180,32 +180,51 @@ export function AdminDashboardLayout() {
         <div className="sales-dash__sidebar-spacer" aria-hidden />
 
         <div className="sales-dash__sidebar-bottom">
-          <button
-            type="button"
-            className="sales-dash__user-switch"
-            title={switchLabel}
-            aria-label={switchLabel}
-            onClick={() => void switchAccount()}
-          >
-            {!collapsed ? (
-              <>
+          {mode === 'local' ? (
+            <div className="sales-dash__user-switch sales-dash__user-switch--static">
+              {!collapsed ? (
+                <>
+                  <span className="sales-dash__user-avatar" aria-hidden>
+                    {initials}
+                  </span>
+                  <span className="sales-dash__user-text">
+                    <span className="sales-dash__user-name">{user?.displayName ?? '—'}</span>
+                  </span>
+                </>
+              ) : (
                 <span className="sales-dash__user-avatar" aria-hidden>
                   {initials}
                 </span>
-                <span className="sales-dash__user-text">
-                  <span className="sales-dash__user-name">{user?.displayName ?? '—'}</span>
-                  <span className="sales-dash__user-action">{switchLabel}</span>
+              )}
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="sales-dash__user-switch"
+              title={switchLabel}
+              aria-label={switchLabel}
+              onClick={() => void switchAccount()}
+            >
+              {!collapsed ? (
+                <>
+                  <span className="sales-dash__user-avatar" aria-hidden>
+                    {initials}
+                  </span>
+                  <span className="sales-dash__user-text">
+                    <span className="sales-dash__user-name">{user?.displayName ?? '—'}</span>
+                    <span className="sales-dash__user-action">{switchLabel}</span>
+                  </span>
+                  <span className="sales-dash__user-switch-chevron" aria-hidden>
+                    <IconChevronDown />
+                  </span>
+                </>
+              ) : (
+                <span className="sales-dash__user-switch-collapsed-icon" aria-hidden>
+                  <IconUserSwitch />
                 </span>
-                <span className="sales-dash__user-switch-chevron" aria-hidden>
-                  <IconChevronDown />
-                </span>
-              </>
-            ) : (
-              <span className="sales-dash__user-switch-collapsed-icon" aria-hidden>
-                <IconUserSwitch />
-              </span>
-            )}
-          </button>
+              )}
+            </button>
+          )}
         </div>
       </aside>
       <div className="sales-dash__main admin-dash__main">

@@ -64,6 +64,20 @@ export async function localLogin(
   return res.json() as Promise<{ token: string; user: AuthUser }>
 }
 
+export async function localDevSwitchAsRole(
+  role: Role,
+): Promise<{ token: string; user: AuthUser }> {
+  const res = await fetch(`${API_BASE}/api/auth/local/dev-switch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role }),
+  })
+  if (!res.ok) {
+    throw new Error(await jsonError(res))
+  }
+  return res.json() as Promise<{ token: string; user: AuthUser }>
+}
+
 export async function fetchLocalMe(accessToken: string): Promise<AuthUser> {
   const res = await fetch(`${API_BASE}/api/auth/local/me`, {
     headers: { Authorization: `Bearer ${accessToken}` },

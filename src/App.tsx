@@ -21,6 +21,7 @@ import { NewQuotePage } from './pages/NewQuotePage'
 import { OvfEntryPage } from './pages/OvfEntryPage'
 import { QuotePoPage } from './pages/QuotePoPage'
 import { SalesHome } from './pages/SalesHome'
+import { SalesDraftsPage } from './pages/SalesDraftsPage'
 import { ScmHome } from './pages/ScmHome'
 import { ScmPoPage } from './pages/ScmPoPage'
 import { ScmPurchaseOrdersPage } from './pages/ScmPurchaseOrdersPage'
@@ -110,6 +111,7 @@ const router = createBrowserRouter([
     element: <SalesLayout />,
     children: [
       { index: true, element: <SalesHome /> },
+      { path: 'drafts', element: <SalesDraftsPage /> },
       { path: 'vendors/new', element: <VendorNewPage /> },
       { path: 'vendors', element: <VendorsPage /> },
       { path: 'quote/from-invoice', element: <InvoiceToQuotePage /> },

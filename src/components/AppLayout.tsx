@@ -1,4 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
+import { LocalRoleSwitcher } from './LocalRoleSwitcher'
 import { useAuth } from '../context/useAuth'
 import { ROLE_LABELS } from '../types/roles'
 
@@ -13,7 +14,7 @@ type Props = {
 }
 
 export function AppLayout({ children, mainClassName, workspace }: Props) {
-  const { user, logout } = useAuth()
+  const { user, logout, mode } = useAuth()
   const { pathname } = useLocation()
   const onAdminApp = pathname.startsWith('/admin')
 
@@ -32,7 +33,9 @@ export function AppLayout({ children, mainClassName, workspace }: Props) {
         <div className="app-header__user">
           {user ? (
             <>
-              {user.role ? (
+              {mode === 'local' ? (
+                <LocalRoleSwitcher variant="header" />
+              ) : user.role ? (
                 <span className="role-pill">{ROLE_LABELS[user.role]}</span>
               ) : (
                 <span className="role-pill role-pill--pending">No role</span>

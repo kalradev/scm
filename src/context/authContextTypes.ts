@@ -1,5 +1,6 @@
 import { createContext } from 'react'
 import type { AuthUser } from '../types/auth'
+import type { Role } from '../types/roles'
 
 export type AuthStatus = 'loading' | 'ready'
 
@@ -12,6 +13,8 @@ export type AuthContextValue = {
   getAccessToken: () => Promise<string | null>
   /** Microsoft sign-in (only in `azure` mode). */
   login: (() => Promise<void>) | null
+  /** Local: pick a role and enter without a password (only in `local` mode). */
+  loginAsRole: ((role: Role) => Promise<void>) | null
   /** Local: username and password against the API (only in `local` mode). */
   loginWithCredentials: ((username: string, password: string) => Promise<void>) | null
   /** Local: create the first admin account when no users exist yet. */

@@ -91,6 +91,30 @@ export async function getLocalUserByUsername(
   return users.find((u) => u.username === key) ?? null
 }
 
+export async function getLocalUserByRole(
+  role: StoredRole,
+): Promise<LocalUserRecord | null> {
+  const { users } = await readAll()
+  return users.find((u) => u.role === role) ?? null
+}
+
+/** Ensures a local user exists for each role (dev / demo switching without passwords). */
+export async function ensureDevUserForRole(role: StoredRole): Promise<LocalUserRecord> {
+  const existing = await getLocalUserByRole(role)
+  if (existing) return existing
+  const label =
+    role === 'scm'
+      ? 'SCM'
+      : role.charAt(0).toUpperCase() + role.slice(1)
+  return createLocalUser({
+    username: role,
+    password: 'dev',
+    role,
+    displayName: `${label} (demo)`,
+    email: '',
+  })
+}
+
 export async function createLocalUser(input: {
   username: string
   password: string

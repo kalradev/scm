@@ -12,8 +12,18 @@ import type { ScmPoStoredState } from '../types/scmPo'
 // Bump storage version to start fresh (ignore old test data in localStorage).
 const STORAGE_KEY = 'scm_workflow_saved_quotes_v2'
 
+export type QuotesStorageMode = 'local' | 'database'
+
+let memoryCache: SavedQuoteRecord[] | null = null
+let storageMode: QuotesStorageMode = 'local'
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+let pendingPersist: SavedQuoteRecord[] | null = null
+
 /** Same key as persisted quotes; use for `storage` listeners so Finance refreshes when Sales updates another tab. */
 export const SAVED_QUOTES_LOCAL_STORAGE_KEY = STORAGE_KEY
+
+/** Same-tab refresh when quotes are saved (storage events only fire across tabs). */
+export const SAVED_QUOTES_UPDATED_EVENT = 'scm-saved-quotes-updated'
 
 export type SavedQuoteRecord = {
   id: string
@@ -71,7 +81,7 @@ function parseStoredRecords(raw: unknown): SavedQuoteRecord[] {
   })
 }
 
-function readAll(): SavedQuoteRecord[] {
+function readLocalStorageRaw(): SavedQuoteRecord[] {
   if (typeof window === 'undefined' || !window.localStorage) return []
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY)
@@ -81,6 +91,35 @@ function readAll(): SavedQuoteRecord[] {
   } catch {
     return []
   }
+}
+
+/** Read legacy browser storage (for one-time import into PostgreSQL). */
+export function readLocalStorageBackup(): SavedQuoteRecord[] {
+  return readLocalStorageRaw()
+}
+
+export function setQuotesStorageFromServer(records: SavedQuoteRecord[]): void {
+  memoryCache = parseStoredRecords(records)
+  storageMode = 'database'
+}
+
+export function clearQuotesStorageCache(): void {
+  memoryCache = null
+  storageMode = 'local'
+  pendingPersist = null
+  if (persistTimer) {
+    clearTimeout(persistTimer)
+    persistTimer = null
+  }
+}
+
+export function getQuotesStorageMode(): QuotesStorageMode {
+  return storageMode
+}
+
+function readAll(): SavedQuoteRecord[] {
+  if (memoryCache !== null) return memoryCache
+  return readLocalStorageRaw()
 }
 
 /** All saved quotes/OVFs/POs in this browser (admin + cross-department view). */
@@ -138,12 +177,36 @@ function compactRecordForStorage(r: SavedQuoteRecord): SavedQuoteRecord {
   }
 }
 
+/** Debounced PostgreSQL sync (imported lazily to avoid circular deps). */
+export function schedulePersistQuotesToDatabase(records: SavedQuoteRecord[]): void {
+  pendingPersist = records.map(compactRecordForStorage)
+  if (persistTimer) clearTimeout(persistTimer)
+  persistTimer = setTimeout(() => {
+    persistTimer = null
+    const batch = pendingPersist
+    pendingPersist = null
+    if (!batch) return
+    void import('./savedQuotesDbSync').then((m) => m.persistQuotesSnapshot(batch))
+  }, 400)
+}
+
 /** @returns false if storage is unavailable or quota / security blocked the write. */
 function writeAll(records: SavedQuoteRecord[]): boolean {
+  const compacted = records.map(compactRecordForStorage)
+  memoryCache = compacted
+
+  if (storageMode === 'database') {
+    schedulePersistQuotesToDatabase(compacted)
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(SAVED_QUOTES_UPDATED_EVENT))
+    }
+    return true
+  }
+
   if (typeof window === 'undefined' || !window.localStorage) return false
   try {
-    const compacted = records.map(compactRecordForStorage)
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(compacted))
+    window.dispatchEvent(new CustomEvent(SAVED_QUOTES_UPDATED_EVENT))
     return true
   } catch {
     return false

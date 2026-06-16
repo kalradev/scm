@@ -10,11 +10,14 @@ import {
   fetchMe,
   fetchLocalMe,
   LOCAL_SESSION_TOKEN_KEY,
+  localDevSwitchAsRole,
   localLogin,
   localRegisterFirstAdmin,
 } from '../api/authApi'
+import { hydrateSavedQuotesFromDatabase, resetQuotesHydration } from '../lib/savedQuotesDbSync'
 import { getMsalInstance, loginRequest } from '../auth/msalConfig'
 import type { AuthUser } from '../types/auth'
+import type { Role } from '../types/roles'
 import {
   AuthContext,
   type AuthContextValue,
@@ -39,9 +42,13 @@ function AuthProviderLocal({ children }: { children: ReactNode }) {
       }
       try {
         const me = await fetchLocalMe(token)
-        if (!cancelled) setUser(me)
+        if (!cancelled) {
+          await hydrateSavedQuotesFromDatabase(token)
+          setUser(me)
+        }
       } catch {
         sessionStorage.removeItem(LOCAL_SESSION_TOKEN_KEY)
+        resetQuotesHydration()
         if (!cancelled) setUser(null)
       } finally {
         if (!cancelled) setStatus('ready')
@@ -53,11 +60,20 @@ function AuthProviderLocal({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  const loginAsRole = useCallback(async (role: Role) => {
+    setLastError(null)
+    const { token, user: next } = await localDevSwitchAsRole(role)
+    sessionStorage.setItem(LOCAL_SESSION_TOKEN_KEY, token)
+    await hydrateSavedQuotesFromDatabase(token)
+    setUser(next)
+  }, [])
+
   const loginWithCredentials = useCallback(
     async (username: string, password: string) => {
       setLastError(null)
       const { token, user: next } = await localLogin(username, password)
       sessionStorage.setItem(LOCAL_SESSION_TOKEN_KEY, token)
+      await hydrateSavedQuotesFromDatabase(token)
       setUser(next)
     },
     [],
@@ -73,6 +89,7 @@ function AuthProviderLocal({ children }: { children: ReactNode }) {
       setLastError(null)
       const { token, user: next } = await localRegisterFirstAdmin(input)
       sessionStorage.setItem(LOCAL_SESSION_TOKEN_KEY, token)
+      await hydrateSavedQuotesFromDatabase(token)
       setUser(next)
     },
     [],
@@ -81,6 +98,7 @@ function AuthProviderLocal({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     setUser(null)
     setLastError(null)
+    resetQuotesHydration()
     sessionStorage.removeItem(LOCAL_SESSION_TOKEN_KEY)
   }, [])
 
@@ -101,6 +119,7 @@ function AuthProviderLocal({ children }: { children: ReactNode }) {
       lastError,
       getAccessToken,
       login: null,
+      loginAsRole,
       loginWithCredentials,
       registerFirstAdmin,
       logout,
@@ -111,6 +130,7 @@ function AuthProviderLocal({ children }: { children: ReactNode }) {
       user,
       lastError,
       getAccessToken,
+      loginAsRole,
       loginWithCredentials,
       registerFirstAdmin,
       logout,
@@ -177,6 +197,7 @@ function AuthProviderAzure({ children }: { children: ReactNode }) {
         if (cancelled) return
         const me = await fetchMe(accessToken)
         if (cancelled) return
+        await hydrateSavedQuotesFromDatabase(accessToken)
         setUser(me)
       } catch (e) {
         if (!cancelled) {
@@ -202,6 +223,7 @@ function AuthProviderAzure({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     setUser(null)
     setLastError(null)
+    resetQuotesHydration()
     await instance.logoutPopup({
       postLogoutRedirectUri: window.location.origin,
     })
@@ -245,6 +267,7 @@ function AuthProviderAzure({ children }: { children: ReactNode }) {
       lastError,
       getAccessToken,
       login,
+      loginAsRole: null,
       loginWithCredentials: null,
       registerFirstAdmin: null,
       logout,

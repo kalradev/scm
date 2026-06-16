@@ -1,7 +1,8 @@
+import { effectiveOvfWorkflow } from './ovfWorkflow'
 import { normalizeQuoteFormData } from './quoteFormDefaults'
 import { poMatchLabel } from './quotePoMatch'
 import type { QuoteFormData } from '../types/quotePdf'
-import type { SavedQuoteRecord } from './savedQuotesStorage'
+import { isQuoteDraft, type SavedQuoteRecord } from './savedQuotesStorage'
 
 /** Rows created from invoice import attach `quoteFinanceReview` on finalize. */
 export function usesInvoiceQuotePipeline(record: SavedQuoteRecord | null | undefined): boolean {
@@ -20,6 +21,15 @@ export function effectiveQuoteFinanceStatus(
     return s
   }
   return 'none'
+}
+
+/** Sales dashboard: quote, customer PO, or OVF sent back by Finance. */
+export function isSalesFinanceRejectedQuote(record: SavedQuoteRecord): boolean {
+  if (isQuoteDraft(record)) return false
+  if (effectiveQuoteFinanceStatus(record) === 'finance_rejected') return true
+  if (effectivePoFinanceStatus(record) === 'finance_rejected') return true
+  if (effectiveOvfWorkflow(record.ovf) === 'finance_rejected') return true
+  return false
 }
 
 export function effectivePoFinanceStatus(

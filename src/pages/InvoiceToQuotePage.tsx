@@ -1,6 +1,11 @@
-import { useCallback, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { extractInvoiceLineItemsFromFile } from '../lib/extractInvoiceLineItems'
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { extractInvoiceLineItemsFromFile, extractInvoiceRawTextForFooterScan } from '../lib/extractInvoiceLineItems'
+import {
+  parseInvoiceFooterAmounts,
+  resolveInvoiceGrandTotalInr,
+  type ParsedInvoiceFooterAmounts,
+} from '../lib/invoiceFooterAmounts'
 import {
   QUOTE_INVOICE_BOOTSTRAP_STORAGE_KEY,
   QUOTE_INVOICE_VENDOR_BRIDGE_KEY,
@@ -9,6 +14,8 @@ import {
 } from '../lib/quoteInvoiceSeed'
 
 const MAX_BOOTSTRAP_INVOICE_BYTES = 2_600_000
+
+const FORMAT_CHIPS = ['PDF', 'Excel', 'CSV', 'Photo'] as const
 
 function readLocalFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -63,20 +70,103 @@ function formatInr(n: number): string {
   })
 }
 
+type InvoiceTotalRow = {
+  label: string
+  amount: number
+  kind: 'subtotal' | 'charge' | 'total'
+}
+
+function buildInvoiceTotalRows(
+  lineSubtotal: number,
+  footer: ParsedInvoiceFooterAmounts | null,
+  grand: number,
+): InvoiceTotalRow[] {
+  const rows: InvoiceTotalRow[] = []
+  const footerSub = footer?.subtotal
+  const subtotal =
+    footerSub != null &&
+    Number.isFinite(footerSub) &&
+    footerSub > 0 &&
+    Math.abs(footerSub - lineSubtotal) < 2
+      ? footerSub
+      : lineSubtotal
+
+  rows.push({ label: 'Subtotal (lines)', amount: subtotal, kind: 'subtotal' })
+
+  const impliedTax = grand - subtotal
+  const taxFromFooter =
+    footer?.totalTaxAmount != null &&
+    Number.isFinite(footer.totalTaxAmount) &&
+    footer.totalTaxAmount > 0
+      ? footer.totalTaxAmount
+      : null
+
+  const taxAmount =
+    taxFromFooter != null && Math.abs(subtotal + taxFromFooter - grand) < 1.5
+      ? taxFromFooter
+      : impliedTax > 0.02
+        ? impliedTax
+        : null
+
+  if (taxAmount != null && taxAmount > 0.02) {
+    rows.push({
+      label: 'GST / tax (from invoice)',
+      amount: taxAmount,
+      kind: 'charge',
+    })
+  }
+
+  rows.push({ label: 'Grand total (INR)', amount: grand, kind: 'total' })
+  return rows
+}
+
+function IconUpload() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"
+      />
+    </svg>
+  )
+}
+
+function IconFile() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m6.75 12H9.75m3 0h3.75M9.75 9h.008v.008H9.75V9zm0 3.75h.008v.008H9.75v-.008zM9.75 12.75h.008v.008H9.75v-.008zm3.75 0h.008v.008H15.75v-.008zM9.75 16.5h.008v.008H9.75V16.5zm3.75 0h.008v.008H15.75V16.5z"
+      />
+    </svg>
+  )
+}
+
+type InvoiceImportLocationState = {
+  pendingInvoiceFile?: File
+}
+
 export function InvoiceToQuotePage() {
   const navigate = useNavigate()
+  const location = useLocation()
   const inputRef = useRef<HTMLInputElement>(null)
   const lastImportedFileRef = useRef<File | null>(null)
+  const pendingDropHandledRef = useRef(false)
   const [busy, setBusy] = useState(false)
+  const [dragOver, setDragOver] = useState(false)
   const [ocrProgress, setOcrProgress] = useState<number | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [preview, setPreview] = useState<QuoteInvoiceSeedPayload | null>(null)
+  const [footerTotals, setFooterTotals] = useState<ParsedInvoiceFooterAmounts | null>(null)
 
   const handleFile = useCallback(
     async (file: File | null) => {
       lastImportedFileRef.current = null
       setMessage(null)
       setPreview(null)
+      setFooterTotals(null)
       setOcrProgress(null)
       if (!file) return
       setBusy(true)
@@ -94,6 +184,9 @@ export function InvoiceToQuotePage() {
         } catch {
           /* ignore */
         }
+        const rawText = await extractInvoiceRawTextForFooterScan(file)
+        const footer = parseInvoiceFooterAmounts(rawText)
+        setFooterTotals(footer)
         setPreview({
           lines: res.lines,
           sourceFileName: file.name,
@@ -104,6 +197,26 @@ export function InvoiceToQuotePage() {
       }
     },
     [],
+  )
+
+  useEffect(() => {
+    const state = location.state as InvoiceImportLocationState | null
+    const file = state?.pendingInvoiceFile
+    if (!file || pendingDropHandledRef.current) return
+    pendingDropHandledRef.current = true
+    navigate(location.pathname, { replace: true, state: null })
+    void handleFile(file)
+  }, [location.pathname, location.state, navigate, handleFile])
+
+  const onDrop = useCallback(
+    (e: DragEvent) => {
+      e.preventDefault()
+      setDragOver(false)
+      if (busy) return
+      const file = e.dataTransfer.files?.[0] ?? null
+      void handleFile(file)
+    },
+    [busy, handleFile],
   )
 
   const handleContinue = useCallback(() => {
@@ -165,128 +278,216 @@ export function InvoiceToQuotePage() {
     })()
   }, [navigate, preview])
 
+  const lineSubtotal = preview
+    ? preview.lines.reduce((sum, row) => {
+        const qty = parseMoney(row.qty)
+        const rate = parseMoney(row.vendorUnitPrice)
+        if (qty <= 0 || rate <= 0) return sum
+        return sum + qty * rate
+      }, 0)
+    : 0
+
+  const grand = footerTotals
+    ? resolveInvoiceGrandTotalInr(footerTotals, lineSubtotal)
+    : lineSubtotal
+
+  const totalRows = preview
+    ? buildInvoiceTotalRows(lineSubtotal, footerTotals, grand)
+    : []
+
   return (
-    <div className="invoice-to-quote-page">
-      <p className="panel__back">
-        <Link to="/sales" className="link-back">
-          ← Back to Sales
-        </Link>
-      </p>
-      <h2 className="invoice-to-quote-page__title">New quote from invoice</h2>
+    <div className="invoice-import">
+      <header className="invoice-import__hero">
+        <div className="invoice-import__hero-top">
+          <Link to="/sales" className="invoice-import__back">
+            ← Back to Sales
+          </Link>
+        </div>
+        <h1 className="invoice-import__title">New quote from invoice</h1>
+      </header>
 
-      <div className="invoice-to-quote-page__card card-surface">
-        <label className="field invoice-to-quote-page__upload">
-          <span className="field__label">
-            Invoice file (Excel, PDF, CSV, photo…)
-          </span>
-          <input
-            ref={inputRef}
-            type="file"
-            accept={ACCEPT}
-            className="field__control"
+      {message ? (
+        <div className="invoice-import__alert form-validation-banner" role="alert">
+          {message}
+        </div>
+      ) : null}
+
+      {!preview ? (
+        <section className="invoice-import__upload-section" aria-label="Upload invoice">
+          <button
+            type="button"
+            className={`invoice-import__dropzone${dragOver ? ' invoice-import__dropzone--active' : ''}${busy ? ' invoice-import__dropzone--busy' : ''}`}
             disabled={busy}
-            onChange={(e) => {
-              const file = e.currentTarget.files?.[0] ?? null
-              // Allow selecting the same file again to re-run analysis.
-              e.currentTarget.value = ''
-              void handleFile(file)
+            onClick={() => inputRef.current?.click()}
+            onDragEnter={(e) => {
+              e.preventDefault()
+              setDragOver(true)
             }}
-          />
-        </label>
-        {busy ? (
-          <p className="muted" aria-busy="true">
-            {ocrProgress !== null
-              ? `Recognizing text… ${ocrProgress}%`
-              : 'Reading file…'}
-          </p>
-        ) : null}
-        {message ? (
-          <div className="form-validation-banner" role="alert">
-            {message}
-          </div>
-        ) : null}
+            onDragOver={(e) => {
+              e.preventDefault()
+              setDragOver(true)
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault()
+              setDragOver(false)
+            }}
+            onDrop={onDrop}
+          >
+            <input
+              ref={inputRef}
+              type="file"
+              accept={ACCEPT}
+              className="invoice-import__file-input"
+              disabled={busy}
+              tabIndex={-1}
+              aria-hidden
+              onChange={(e) => {
+                const file = e.currentTarget.files?.[0] ?? null
+                e.currentTarget.value = ''
+                void handleFile(file)
+              }}
+            />
+            <span className="invoice-import__dropzone-icon" aria-hidden>
+              <IconUpload />
+            </span>
+            {busy ? (
+              <div className="invoice-import__progress">
+                <p className="invoice-import__dropzone-title" aria-busy="true">
+                  {ocrProgress !== null ? 'Recognizing text…' : 'Reading file…'}
+                </p>
+                {ocrProgress !== null ? (
+                  <div className="invoice-import__progress-track" role="progressbar" aria-valuenow={ocrProgress} aria-valuemin={0} aria-valuemax={100}>
+                    <span
+                      className="invoice-import__progress-fill"
+                      style={{ width: `${ocrProgress}%` }}
+                    />
+                  </div>
+                ) : (
+                  <div className="invoice-import__progress-track invoice-import__progress-track--indeterminate">
+                    <span className="invoice-import__progress-fill" />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <>
+                <p className="invoice-import__dropzone-title">Drop your invoice here</p>
+                <p className="invoice-import__dropzone-sub">or click to browse files</p>
+              </>
+            )}
+          </button>
+          <ul className="invoice-import__formats" aria-label="Supported formats">
+            {FORMAT_CHIPS.map((label) => (
+              <li key={label} className="invoice-import__format-chip">
+                {label}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
-        {preview ? (
-          <div className="invoice-to-quote-page__preview">
-            <h3 className="invoice-to-quote-page__preview-title">
-              Extracted from {preview.sourceFileName}
-            </h3>
-            <p className="muted invoice-to-quote-page__preview-hint">
-              {preview.lines.length} line{preview.lines.length === 1 ? '' : 's'} — product,
-              description, and qty carry to the quote. A parsed supplier rate (when present) is
-              stored for Finance only; you enter the customer unit price on the quote.
-            </p>
-            <div className="invoice-to-quote-page__table-wrap">
-              <table className="invoice-to-quote-page__table">
-                <thead>
-                  <tr>
-                    <th scope="col">#</th>
-                    <th scope="col">Product (short)</th>
-                    <th scope="col">Description</th>
-                    <th scope="col">Qty</th>
-                    <th scope="col">Supplier rate (parsed)</th>
-                    <th scope="col">Total (INR)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {preview.lines.map((row, i) => {
-                    const qty = parseMoney(row.qty)
-                    const rate = parseMoney(row.vendorUnitPrice)
-                    const total = qty > 0 && rate > 0 ? qty * rate : 0
-                    return (
-                      <tr key={`${i}-${row.description.slice(0, 20)}`}>
-                        <td>{i + 1}</td>
-                        <td>{row.product || '—'}</td>
-                        <td>{row.description || '—'}</td>
-                        <td>{row.qty}</td>
-                        <td>{row.vendorUnitPrice ?? '—'}</td>
-                        <td>{total > 0 ? formatInr(total) : '—'}</td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-                <tfoot>
-                  <tr>
-                    <td colSpan={5} style={{ textAlign: 'right', fontWeight: 700 }}>
-                      Grand total (INR)
-                    </td>
-                    <td style={{ fontWeight: 700 }}>
-                      {formatInr(
-                        preview.lines.reduce((sum, row) => {
-                          const qty = parseMoney(row.qty)
-                          const rate = parseMoney(row.vendorUnitPrice)
-                          if (qty <= 0 || rate <= 0) return sum
-                          return sum + qty * rate
-                        }, 0),
-                      )}
-                    </td>
-                  </tr>
-                </tfoot>
-              </table>
+      {preview ? (
+        <section className="invoice-import__results" aria-label="Extracted invoice data">
+          <div className="invoice-import__results-head">
+            <div className="invoice-import__file-badge">
+              <span className="invoice-import__file-icon" aria-hidden>
+                <IconFile />
+              </span>
+              <div>
+                <h2 className="invoice-import__results-title">{preview.sourceFileName}</h2>
+                <p className="invoice-import__results-meta">
+                  {preview.lines.length} line{preview.lines.length === 1 ? '' : 's'} extracted
+                </p>
+              </div>
             </div>
-            <div className="invoice-to-quote-page__actions">
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => {
-                  setPreview(null)
-                  setMessage(null)
-                  if (inputRef.current) inputRef.current.value = ''
-                }}
-              >
-                Choose another file
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={handleContinue}
-              >
-                Continue to quote
-              </button>
-            </div>
+            <button
+              type="button"
+              className="btn btn-ghost invoice-import__change-file"
+              onClick={() => {
+                setPreview(null)
+                setFooterTotals(null)
+                setMessage(null)
+                if (inputRef.current) inputRef.current.value = ''
+              }}
+            >
+              Change file
+            </button>
           </div>
-        ) : null}
-      </div>
+
+          <div className="invoice-import__table-wrap">
+            <table className="invoice-import__table">
+              <thead>
+                <tr>
+                  <th scope="col">#</th>
+                  <th scope="col">Product</th>
+                  <th scope="col">Description</th>
+                  <th scope="col" className="invoice-import__cell--num">
+                    Qty
+                  </th>
+                  <th scope="col" className="invoice-import__cell--num">
+                    Supplier rate
+                  </th>
+                  <th scope="col" className="invoice-import__cell--num">
+                    Line total
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.lines.map((row, i) => {
+                  const qty = parseMoney(row.qty)
+                  const rate = parseMoney(row.vendorUnitPrice)
+                  const total = qty > 0 && rate > 0 ? qty * rate : 0
+                  return (
+                    <tr key={`${i}-${row.description.slice(0, 20)}`}>
+                      <td className="invoice-import__cell--idx">{i + 1}</td>
+                      <td>{row.product || '—'}</td>
+                      <td className="invoice-import__cell--desc">{row.description || '—'}</td>
+                      <td className="invoice-import__cell--num">{row.qty}</td>
+                      <td className="invoice-import__cell--num">
+                        {row.vendorUnitPrice ?? '—'}
+                      </td>
+                      <td className="invoice-import__cell--num">
+                        {total > 0 ? formatInr(total) : '—'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="invoice-import__totals" aria-label="Invoice total breakdown">
+            <table className="invoice-import__totals-table">
+              <tbody>
+                {totalRows.map((row) => (
+                  <tr
+                    key={row.label}
+                    className={
+                      row.kind === 'total'
+                        ? 'invoice-import__totals-row--grand'
+                        : row.kind === 'charge'
+                          ? 'invoice-import__totals-row--charge'
+                          : undefined
+                    }
+                  >
+                    <th scope="row">{row.label}</th>
+                    <td>
+                      {row.kind === 'charge'
+                        ? `${row.amount >= 0 ? '+' : '−'}₹${formatInr(Math.abs(row.amount))}`
+                        : `₹${formatInr(row.amount)}`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="invoice-import__actions">
+            <button type="button" className="btn btn-primary invoice-import__continue" onClick={handleContinue}>
+              Continue to quote →
+            </button>
+          </div>
+        </section>
+      ) : null}
     </div>
   )
 }
