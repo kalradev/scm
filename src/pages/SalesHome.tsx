@@ -15,7 +15,7 @@ import { ShareQuoteOutlookModal } from '../components/ShareQuoteOutlookModal'
 import { QuoteDetailsPreviewModal } from './QuotePoPage'
 import { useAuth } from '../context/useAuth'
 import { downloadBlob, downloadQuoteCsvFromForm } from '../lib/quoteExport'
-import { poMatchLabel } from '../lib/quotePoMatch'
+import { hasCustomerPoUploaded } from '../lib/quotePoMatch'
 import {
   computeQuoteFinanceReviewExtras,
   enrichQuoteFormWithVendorAttachment,
@@ -65,10 +65,7 @@ function quoteStats(rows: SavedQuoteRecord[]) {
     }
     finals += 1
     if (isSalesFinanceRejectedQuote(row)) rejected += 1
-    const form = normalizeQuoteFormData(
-      row.formSnapshot as QuoteFormData & { customerTitle?: string },
-    )
-    if (poMatchLabel(form, row.po) === 'matched') poMatched += 1
+    if (hasCustomerPoUploaded(row.po)) poMatched += 1
   }
   return { drafts, finals, poMatched, rejected, total: finals }
 }
@@ -208,11 +205,11 @@ function eyePreviewKind(row: SavedQuoteRecord): EyePreviewOpen['kind'] {
 
 function QuotePipelineStatus({
   row,
-  poMatch,
+  hasPoUploaded,
   onRecordMutated,
 }: {
   row: SavedQuoteRecord
-  poMatch: 'matched' | 'mismatch' | 'none'
+  hasPoUploaded: boolean
   onRecordMutated: () => void
 }) {
   const { user } = useAuth()
@@ -225,7 +222,7 @@ function QuotePipelineStatus({
   const sentToBuyer = Boolean(row.customerQuoteShipment?.sentToCustomerAt)
   const canPoPage = invoicePath ? canSalesAccessCustomerPoStep(row) : true
   const showUploadPoCta =
-    poMatch !== 'matched' &&
+    !hasPoUploaded &&
     canPoPage &&
     // After PO is submitted to Finance for GST review, Sales should not keep seeing "Upload PO".
     !(invoicePath && poFinance === 'pending_finance') &&
@@ -244,7 +241,7 @@ function QuotePipelineStatus({
   const showSubmitPoToFinanceCta =
     invoicePath &&
     Boolean(user) &&
-    poMatch === 'matched' &&
+    hasPoUploaded &&
     Boolean(row.po) &&
     (poFinance === 'none' || poFinance === 'finance_rejected') &&
     invoiceQs === 'finance_approved' &&
@@ -277,7 +274,7 @@ function QuotePipelineStatus({
       ) : null}
       {invoicePath &&
       poFinance === 'pending_finance' &&
-      poMatch === 'matched' ? (
+      hasPoUploaded ? (
         <span
           className="muted sales-dashboard__pipeline-hint"
           title="Finance is reviewing the customer PO (GST and line checks). You can create the OVF after they approve."
@@ -287,7 +284,7 @@ function QuotePipelineStatus({
       ) : null}
       {invoicePath &&
       poFinance === 'finance_rejected' &&
-      poMatch === 'matched' ? (
+      hasPoUploaded ? (
         <span className="sales-dashboard__pipeline-hint sales-dashboard__pipeline-hint--warn">
           PO rejected
         </span>
@@ -296,12 +293,12 @@ function QuotePipelineStatus({
       invoiceQs === 'finance_approved' &&
       sentToBuyer &&
       poFinance === 'none' &&
-      poMatch === 'matched' &&
+      hasPoUploaded &&
       row.po &&
       !showSubmitPoToFinanceCta ? (
         <span className="muted sales-dashboard__pipeline-hint">Submit PO in PO tab</span>
       ) : null}
-      {invoicePath && quoteAwaitingFinance && poMatch !== 'matched' ? (
+      {invoicePath && quoteAwaitingFinance && !hasPoUploaded ? (
         <span className="muted sales-dashboard__pipeline-hint">Awaiting Finance</span>
       ) : null}
       {showUploadPoCta ? (
@@ -351,7 +348,7 @@ function QuotePipelineStatus({
         <button
           type="button"
           className="btn btn-primary btn--compact sales-dashboard__action-primary sales-dashboard__status-action-btn"
-          title="Send the matched customer PO to Finance for GST and line checks. OVF unlocks after approval."
+          title="Send the customer PO to Finance for GST and line checks. OVF unlocks after approval."
           onClick={() => {
             if (!user) return
             const next = submitMatchedPoToFinanceForRecord(row.id)
@@ -360,7 +357,7 @@ function QuotePipelineStatus({
               return
             }
             window.alert(
-              'Could not submit to Finance. Open the PO tab and confirm totals still match the quote.',
+              'Could not submit to Finance. Open the PO tab and upload the customer PO first.',
             )
           }}
         >
@@ -577,13 +574,13 @@ function QuoteMoreMenu({
 
 function FinalizedQuoteRowCells({
   row,
-  poMatch,
+  hasPoUploaded,
   onOpenShare,
   onOpenEyePreview,
   onRecordMutated,
 }: {
   row: SavedQuoteRecord
-  poMatch: 'matched' | 'mismatch' | 'none'
+  hasPoUploaded: boolean
   onOpenShare: () => void
   onOpenEyePreview: (open: EyePreviewOpen) => void
   onRecordMutated: () => void
@@ -594,7 +591,7 @@ function FinalizedQuoteRowCells({
       <td className="sales-dashboard__table-col--status">
         <QuotePipelineStatus
           row={row}
-          poMatch={poMatch}
+          hasPoUploaded={hasPoUploaded}
           onRecordMutated={onRecordMutated}
         />
       </td>
@@ -621,15 +618,9 @@ type WfPill = {
   warn?: boolean
 }
 
-/** PO not matched yet: show pipeline before OVF (aligned with `QuoteOvfWorkflowRow` + invoice quote steps). */
-function QuotePoGateWorkflowRow({
-  row,
-  poMatch,
-}: {
-  row: SavedQuoteRecord
-  poMatch: 'none' | 'mismatch'
-}) {
-  const warn = poMatch === 'mismatch'
+/** PO not uploaded yet: show pipeline before OVF. */
+function QuotePoGateWorkflowRow({ row }: { row: SavedQuoteRecord }) {
+  const hasPo = hasCustomerPoUploaded(row.po)
   const invoicePath = usesInvoiceQuotePipeline(row)
   const qs = effectiveQuoteFinanceStatus(row)
   const ps = invoicePath ? effectivePoFinanceStatus(row) : ('none' as const)
@@ -668,8 +659,8 @@ function QuotePoGateWorkflowRow({
   } else if (invoicePath && ps === 'finance_approved') {
     pills.push({ key: 'po', state: 'done', label: 'PO · approved' })
   } else {
-    const poLabel = warn ? 'PO · totals mismatch' : 'PO · awaiting upload'
-    pills.push({ key: 'po', state: 'current', label: poLabel, warn })
+    const poLabel = hasPo ? 'PO · uploaded' : 'PO · awaiting upload'
+    pills.push({ key: 'po', state: 'current', label: poLabel })
   }
 
   pills.push(
@@ -705,23 +696,11 @@ function QuotePoGateWorkflowRow({
 }
 
 /** Second table row: full OVF / finance / SCM when PO gate cleared; otherwise PO gate. */
-function QuoteSalesWorkflowRow({
-  row,
-  poMatch,
-}: {
-  row: SavedQuoteRecord
-  poMatch: 'matched' | 'mismatch' | 'none'
-}) {
+function QuoteSalesWorkflowRow({ row }: { row: SavedQuoteRecord }) {
   if (salesOvfWorkflowAfterPoGate(row)) {
     return <QuoteOvfWorkflowRow row={row} />
   }
-  // Matched PO rows use `QuoteOvfWorkflowRow` above; gate row is only for none/mismatch.
-  return (
-    <QuotePoGateWorkflowRow
-      row={row}
-      poMatch={poMatch as 'none' | 'mismatch'}
-    />
-  )
+  return <QuotePoGateWorkflowRow row={row} />
 }
 
 /**
@@ -735,17 +714,13 @@ function QuoteOvfWorkflowRow({ row }: { row: SavedQuoteRecord }) {
   const invoicePath = usesInvoiceQuotePipeline(row)
   const qs = effectiveQuoteFinanceStatus(row)
   const sent = Boolean(row.customerQuoteShipment?.sentToCustomerAt)
-  const formForMatch = normalizeQuoteFormData(
-    row.formSnapshot as QuoteFormData & { customerTitle?: string },
-  )
-  const poTotalsMatch = poMatchLabel(formForMatch, row.po) === 'matched'
   const poFinanceSt = invoicePath ? effectivePoFinanceStatus(row) : 'none'
   const poStepDoneLabel =
-    poTotalsMatch
-      ? 'PO · matched'
+    hasCustomerPoUploaded(row.po)
+      ? 'PO · uploaded'
       : invoicePath && poFinanceSt === 'finance_approved'
         ? 'PO · approved'
-        : 'PO · matched'
+        : 'PO · uploaded'
 
   const pills: WfPill[] = [{ key: 'quote', state: 'done', label: 'Quote final' }]
 
@@ -860,17 +835,13 @@ function SalesQuoteTableRowGroup({
   const form = normalizeQuoteFormData(
     row.formSnapshot as QuoteFormData & { customerTitle?: string },
   )
-  const poMatch = isQuoteDraft(row) ? 'none' : poMatchLabel(form, row.po)
+  const hasPoUploaded = !isQuoteDraft(row) && hasCustomerPoUploaded(row.po)
 
   return (
     <Fragment>
       <tr
         className={
-          salesOvfWorkflowAfterPoGate(row)
-            ? 'sales-dashboard__row--po-match'
-            : poMatch === 'mismatch'
-              ? 'sales-dashboard__row--po-mismatch'
-              : ''
+          salesOvfWorkflowAfterPoGate(row) ? 'sales-dashboard__row--po-match' : ''
         }
       >
         <td>
@@ -888,8 +859,8 @@ function SalesQuoteTableRowGroup({
           ) : (
             <div className="sales-dashboard__po-match-cell">
               <div className="sales-dashboard__po-match-label-row">
-                {poMatch === 'matched' ? (
-                  <span className="sales-dashboard__badge-match">Match</span>
+                {hasPoUploaded ? (
+                  <span className="sales-dashboard__badge-match">Uploaded</span>
                 ) : usesInvoiceQuotePipeline(row) &&
                   effectivePoFinanceStatus(row) === 'finance_approved' ? (
                   <span
@@ -898,17 +869,10 @@ function SalesQuoteTableRowGroup({
                   >
                     Approved
                   </span>
-                ) : poMatch === 'mismatch' ? (
-                  <span className="sales-dashboard__badge-nomatch">No match</span>
                 ) : (
                   <span className="muted">—</span>
                 )}
               </div>
-              {row.po?.quoteChangedAfterCompareAt ? (
-                <div className="muted sales-dashboard__po-match-quote-note">
-                  Quote updated after PO
-                </div>
-              ) : null}
             </div>
           )}
         </td>
@@ -933,7 +897,7 @@ function SalesQuoteTableRowGroup({
         ) : (
           <FinalizedQuoteRowCells
             row={row}
-            poMatch={poMatch}
+            hasPoUploaded={hasPoUploaded}
             onOpenShare={() => onOpenShare(row)}
             onOpenEyePreview={onOpenEyePreview}
             onRecordMutated={() => refreshList()}
@@ -949,7 +913,7 @@ function SalesQuoteTableRowGroup({
           </td>
         </tr>
       ) : null}
-      {!isQuoteDraft(row) ? <QuoteSalesWorkflowRow row={row} poMatch={poMatch} /> : null}
+      {!isQuoteDraft(row) ? <QuoteSalesWorkflowRow row={row} /> : null}
     </Fragment>
   )
 }
@@ -992,12 +956,7 @@ export function SalesHome() {
     if (quoteListFilter === 'rejected') {
       return finalized.filter(isSalesFinanceRejectedQuote)
     }
-    return finalized.filter((r) => {
-      const form = normalizeQuoteFormData(
-        r.formSnapshot as QuoteFormData & { customerTitle?: string },
-      )
-      return poMatchLabel(form, r.po) === 'matched'
-    })
+    return finalized.filter((r) => hasCustomerPoUploaded(r.po))
   }, [savedQuotes, quoteListFilter])
 
   const finalizedCount = useMemo(
@@ -1176,7 +1135,7 @@ export function SalesHome() {
           </span>
           <div className="sales-dashboard__stat-text">
             <span className="sales-dashboard__stat-value">{stats.poMatched}</span>
-            <span className="sales-dashboard__stat-label">PO matched</span>
+            <span className="sales-dashboard__stat-label">PO uploaded</span>
           </div>
         </button>
         <button
@@ -1279,7 +1238,7 @@ export function SalesHome() {
                 <th scope="col">Recipient</th>
                 <th scope="col">Quote date</th>
                 <th scope="col" className="sales-dashboard__table-col--po-match">
-                  PO match
+                  PO status
                 </th>
                 <th scope="col" className="sales-dashboard__table-col--status">
                   Status

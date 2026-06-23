@@ -5,7 +5,7 @@ import { isQuoteDraft } from './savedQuotesStorage'
 import { effectiveOvfWorkflow } from './ovfWorkflow'
 import { getQuoteMoneySummary } from './quotePdfTemplate'
 import { normalizeQuoteFormData } from './quoteFormDefaults'
-import { poMatchLabel } from './quotePoMatch'
+import { hasCustomerPoUploaded } from './quotePoMatch'
 
 export type PipelineStageId =
   | 'sales_quote_draft'
@@ -148,7 +148,7 @@ export function computeAdminPipelineSnapshot(records: SavedQuoteRecord[]) {
     )
     const { total } = getQuoteMoneySummary(form)
     if (Number.isFinite(total)) totalQuotedInr += total
-    if (poMatchLabel(form, r.po) === 'matched') withPoMatch += 1
+    if (hasCustomerPoUploaded(r.po)) withPoMatch += 1
   }
 
   return {

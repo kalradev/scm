@@ -1,7 +1,5 @@
 import { effectiveOvfWorkflow } from './ovfWorkflow'
-import { normalizeQuoteFormData } from './quoteFormDefaults'
-import { poMatchLabel } from './quotePoMatch'
-import type { QuoteFormData } from '../types/quotePdf'
+import { hasCustomerPoUploaded } from './quotePoMatch'
 import { isQuoteDraft, type SavedQuoteRecord } from './savedQuotesStorage'
 
 /** Rows created from invoice import attach `quoteFinanceReview` on finalize. */
@@ -54,25 +52,19 @@ export function canSalesAccessCustomerPoStep(record: SavedQuoteRecord): boolean 
 }
 
 /**
- * When Sales may open the OVF screen: legacy quotes need PO totals matching the quote; invoice-import
- * quotes need Finance to approve the customer PO (GST) — that approval supersedes strict total match.
+ * When Sales may open the OVF screen: legacy quotes need a customer PO on file;
+ * invoice-import quotes need Finance to approve the customer PO (GST).
  */
 export function canSalesCreateOvf(record: SavedQuoteRecord): boolean {
   if (usesInvoiceQuotePipeline(record)) {
     return record.poFinanceReview?.workflowStatus === 'finance_approved'
   }
-  const form = normalizeQuoteFormData(
-    record.formSnapshot as QuoteFormData & { customerTitle?: string },
-  )
-  return poMatchLabel(form, record.po) === 'matched'
+  return hasCustomerPoUploaded(record.po)
 }
 
-/** Sales list: use the OVF commercial pipeline row after PO totals match, or after Finance approves the PO (invoice path). */
+/** Sales list: OVF pipeline after customer PO is uploaded, or after Finance approves PO (invoice path). */
 export function salesOvfWorkflowAfterPoGate(record: SavedQuoteRecord): boolean {
-  const form = normalizeQuoteFormData(
-    record.formSnapshot as QuoteFormData & { customerTitle?: string },
-  )
-  if (poMatchLabel(form, record.po) === 'matched') return true
+  if (hasCustomerPoUploaded(record.po)) return true
   return (
     usesInvoiceQuotePipeline(record) &&
     effectivePoFinanceStatus(record) === 'finance_approved'
@@ -101,7 +93,7 @@ export function invoicePipelineNoticeForSales(
     return 'Quote approved — use “Sent to customer” before uploading the customer PO.'
   }
   const ps = effectivePoFinanceStatus(record)
-  if (record.po && poMatchedForRecord(record) && ps === 'pending_finance') {
+  if (record.po && hasCustomerPoUploaded(record.po) && ps === 'pending_finance') {
     return 'Finance is verifying the customer PO (GST). You can still preview quote or PO from this row.'
   }
   if (ps === 'finance_rejected') {
@@ -111,18 +103,11 @@ export function invoicePipelineNoticeForSales(
       : 'Finance rejected the customer PO. Submit again after correcting.'
   }
   if (
-    poMatchedForRecord(record) &&
+    hasCustomerPoUploaded(record.po) &&
     ps === 'finance_approved' &&
     !record.ovf
   ) {
     return 'Finance approved the customer PO — create the OVF; line items are prefilled from the quote and PO.'
   }
   return null
-}
-
-function poMatchedForRecord(record: SavedQuoteRecord): boolean {
-  const form = normalizeQuoteFormData(
-    record.formSnapshot as QuoteFormData & { customerTitle?: string },
-  )
-  return poMatchLabel(form, record.po) === 'matched'
 }

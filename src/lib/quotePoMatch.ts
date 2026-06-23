@@ -11,6 +11,15 @@ export function quoteGrandTotalInr(data: QuoteFormData): number {
   return getQuoteMoneySummary(data).total
 }
 
+/** Customer PO file attached (no total comparison required). */
+export function hasCustomerPoUploaded(po: QuotePoState | undefined): boolean {
+  return Boolean(
+    po?.dataBase64?.trim() &&
+      po.fileName?.trim() &&
+      po.fileName !== '(no file yet)',
+  )
+}
+
 /** Whether PO total and quote total agree (paise-level). */
 export function poTotalsMatch(
   formSnapshot: QuoteFormData,

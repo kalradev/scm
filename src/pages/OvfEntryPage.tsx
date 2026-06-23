@@ -35,7 +35,6 @@ import { allocateNextOvfRef } from '../lib/ovfRefSequence'
 import { createEmptyLine, normalizeQuoteFormData } from '../lib/quoteFormDefaults'
 import { filterCommercialLines } from '../lib/quoteLineItems'
 import { canSalesCreateOvf, usesInvoiceQuotePipeline } from '../lib/quotePipeline'
-import { poMatchLabel } from '../lib/quotePoMatch'
 import { lineAmount } from '../lib/quotePdfTemplate'
 import { FinanceSubmitModal } from '../components/FinanceSubmitModal'
 import { useSalesOvfPreviewShell } from '../components/SalesOvfPreviewShellContext'
@@ -43,7 +42,6 @@ import { buildOvfScmOverviewRow } from '../lib/ovfScmSummary'
 import {
   getSavedQuoteById,
   isQuoteDraft,
-  updateSavedQuotePo,
   updateSavedQuoteFormSnapshot,
   updateSavedQuoteOvf,
   updateSavedQuoteOvfByRecordId,
@@ -389,9 +387,6 @@ export function OvfEntryPage({
     )
   }, [record])
 
-  const match =
-    record && data ? poMatchLabel(data, record.po) : ('none' as const)
-
   const wf = effectiveOvfWorkflow(record?.ovf)
   /** Sales: read-only preview (dashboard modal or `?view=1` on the OVF route). */
   const viewOnlySales =
@@ -501,7 +496,7 @@ export function OvfEntryPage({
       setOvfBootstrapBlock(
         usesInvoiceQuotePipeline(fresh)
           ? 'Finance must approve the customer PO (GST check) before you can create the OVF.'
-          : 'PO totals must match the quote before you can work on the OVF. Open the PO page and align amounts.',
+          : 'Upload a customer PO before you can work on the OVF.',
       )
       setOvfReady(true)
       return
@@ -934,33 +929,12 @@ export function OvfEntryPage({
     (updater: (lines: QuoteLineForm[]) => QuoteLineForm[]) => {
       if (!record || !user || !quoteId) return
       const snap = record.formSnapshot as QuoteFormData
-      const prevForm = normalizeQuoteFormData(
-        snap as QuoteFormData & { customerTitle?: string },
-      )
       const currentLines = Array.isArray(snap.lineItems) ? snap.lineItems : []
       const nextLines = updater(currentLines.map((ln) => ({ ...ln })))
       const nextSnapshot: QuoteFormData = { ...snap, lineItems: nextLines }
-      const nextForm = normalizeQuoteFormData(
-        nextSnapshot as QuoteFormData & { customerTitle?: string },
-      )
-      const prevMatch = record.po ? poMatchLabel(prevForm, record.po) : 'none'
-      const nextMatch = record.po ? poMatchLabel(nextForm, record.po) : 'none'
       const next = updateSavedQuoteFormSnapshot(quoteId, user.oid, nextSnapshot)
       if (next) {
         setRecord(next)
-        if (record.po && prevMatch === 'matched' && nextMatch === 'mismatch') {
-          const po = {
-            ...record.po,
-            quoteChangedAfterCompareAt:
-              record.po.quoteChangedAfterCompareAt ?? new Date().toISOString(),
-          }
-          const updated = updateSavedQuotePo(quoteId, user.oid, po)
-          if (updated) setRecord(updated)
-        } else if (record.po && nextMatch === 'matched' && record.po.quoteChangedAfterCompareAt) {
-          const po = { ...record.po, quoteChangedAfterCompareAt: undefined }
-          const updated = updateSavedQuotePo(quoteId, user.oid, po)
-          if (updated) setRecord(updated)
-        }
       }
     },
     [record, user, quoteId],
@@ -2143,11 +2117,6 @@ export function OvfEntryPage({
         <p className="ovf-entry__banner ovf-entry__banner--pending" role="status">
           Submitted to Finance (editing locked). After Finance approves, SCM can create the PO from the SCM
           workspace.
-        </p>
-      ) : null}
-      {record.po?.quoteChangedAfterCompareAt && match === 'mismatch' ? (
-        <p className="ovf-entry__banner ovf-entry__banner--pending" role="status">
-          PO totals became <strong>unmatched</strong> because quote prices were updated after PO compare. A note is shown on the Sales dashboard.
         </p>
       ) : null}
       {mode === 'sales' && wf === 'finance_rejected' ? (

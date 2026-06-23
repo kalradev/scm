@@ -4,7 +4,7 @@ import { Link, Navigate, useParams } from 'react-router-dom'
 import { QuoteDetailsPreviewPanel } from '../components/QuoteDetailsPreviewPanel'
 import { useAuth } from '../context/useAuth'
 import { normalizeQuoteFormData } from '../lib/quoteFormDefaults'
-import { poMatchLabel, quoteGrandTotalInr } from '../lib/quotePoMatch'
+import { hasCustomerPoUploaded, quoteGrandTotalInr } from '../lib/quotePoMatch'
 import { effectivePoFinanceStatus, usesInvoiceQuotePipeline } from '../lib/quotePipeline'
 import {
   getSavedQuoteByIdForUser,
@@ -16,7 +16,6 @@ import {
   type SavedQuoteRecord,
 } from '../lib/savedQuotesStorage'
 import { extractPoNumberFromAttachment } from '../lib/extractPoNumber'
-import { extractPoTotalFromAttachment } from '../lib/extractPoTotal'
 import { formatQuoteDateDisplay } from '../lib/senderAddresses'
 import type { QuoteFormData } from '../types/quotePdf'
 import type { QuotePoState } from '../types/quotePo'
@@ -28,15 +27,6 @@ function formatInr(n: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })
-}
-
-/** Pretty-print stored PO total string for Result copy. */
-function formatPoTotalDisplay(raw: string | undefined): string {
-  const t = String(raw ?? '').trim()
-  if (!t) return '—'
-  const n = Number.parseFloat(t.replace(/,/g, ''))
-  if (Number.isFinite(n)) return formatInr(n)
-  return t
 }
 
 export type QuotePoPanelProps = {
@@ -57,7 +47,6 @@ export function QuotePoPanel({
     undefined,
   )
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
-  const [comparing, setComparing] = useState(false)
 
   const reload = useCallback(() => {
     if (!user || !quoteId) {
@@ -80,7 +69,6 @@ export function QuotePoPanel({
   }, [record])
 
   const quoteTotal = data ? quoteGrandTotalInr(data) : 0
-  const match = record && data ? poMatchLabel(data, record.po) : 'none'
   const invoicePath = Boolean(record && usesInvoiceQuotePipeline(record))
   const poFinance = record ? effectivePoFinanceStatus(record) : 'none'
 
@@ -109,11 +97,8 @@ export function QuotePoPanel({
           mimeType: file.type || 'application/octet-stream',
           dataBase64: result,
           uploadedAt: new Date().toISOString(),
-          poTotalInr: record.po?.poTotalInr || '',
+          poTotalInr: '',
           customerPoNumber: extracted || undefined,
-          comparedAt: record.po?.comparedAt,
-          quoteTotalInrAtCompare: record.po?.quoteTotalInrAtCompare,
-          quoteChangedAfterCompareAt: record.po?.quoteChangedAfterCompareAt,
         }
         const updated = updateSavedQuotePo(quoteId, user.oid, po)
         if (updated) {
@@ -134,7 +119,7 @@ export function QuotePoPanel({
 
   function handleClearPo() {
     if (!user || !quoteId) return
-    if (!window.confirm('Remove PO file and totals from this quote?')) return
+    if (!window.confirm('Remove PO file from this quote?')) return
     const updated = updateSavedQuotePo(quoteId, user.oid, undefined)
     if (updated) {
       setRecord(updated)
@@ -143,54 +128,7 @@ export function QuotePoPanel({
     }
   }
 
-  const hasPoAttachment = Boolean(
-    record?.po?.dataBase64 &&
-      record.po.fileName &&
-      record.po.fileName !== '(no file yet)',
-  )
-
-  const handleCompareTotals = useCallback(async () => {
-    setSaveMsg(null)
-    if (!user || !record?.po || !quoteId || !data || !hasPoAttachment) return
-    setComparing(true)
-    try {
-      const res = await extractPoTotalFromAttachment(
-        record.po.dataBase64,
-        record.po.fileName,
-        record.po.mimeType,
-        quoteTotal,
-      )
-      if (!res.ok) {
-        setSaveMsg(res.message)
-        return
-      }
-      const po: QuotePoState = {
-        ...record.po,
-        poTotalInr: res.amountStr,
-        comparedAt: new Date().toISOString(),
-        quoteTotalInrAtCompare: quoteTotal,
-        quoteChangedAfterCompareAt: undefined,
-      }
-      const updated = updateSavedQuotePo(quoteId, user.oid, po)
-      if (updated) {
-        setRecord(updated)
-        setSaveMsg(
-          `Detected PO total ${res.amountStr} INR — compared to quote total above.`,
-        )
-        onPersisted?.()
-      }
-    } finally {
-      setComparing(false)
-    }
-  }, [
-    user,
-    record,
-    quoteId,
-    data,
-    hasPoAttachment,
-    quoteTotal,
-    onPersisted,
-  ])
+  const hasPoAttachment = hasCustomerPoUploaded(record?.po)
 
   if (!user) {
     if (variant === 'page') {
@@ -263,128 +201,53 @@ export function QuotePoPanel({
         </div>
       </div>
 
-      {match === 'matched' && hasPoAttachment && record.po?.dataBase64 ? (
-        <p className="muted quote-po-page__attached-readonly">
-          PO on file: <strong>{record.po.fileName}</strong> (
-          {new Date(record.po.uploadedAt).toLocaleString()}){' '}
-          <a
-            href={record.po.dataBase64}
-            download={record.po.fileName}
-            className="quote-po-page__download"
-          >
-            Download
-          </a>
-        </p>
-      ) : null}
-
-      {match !== 'matched' ? (
-        <div className="quote-po-page__upload">
-          <label className="field">
-            <span className="field__label">Upload PO (PDF or Excel)</span>
-            <input
-              type="file"
-              accept=".pdf,.xlsx,.xls,.csv,image/*"
-              className="field__control"
-              onChange={(e) => {
-                const file = e.currentTarget.files?.[0] ?? null
-                // Allow selecting the same PO file again to re-run extraction/compare.
-                e.currentTarget.value = ''
-                void handlePoFile(file)
-              }}
-            />
-          </label>
-          {record.po?.fileName ? (
-            <p className="muted">
-              Current file: <strong>{record.po.fileName}</strong> (
-              {new Date(record.po.uploadedAt).toLocaleString()})
-              {record.po.dataBase64 ? (
-                <>
-                  {' '}
-                  <a
-                    href={record.po.dataBase64}
-                    download={record.po.fileName}
-                    className="quote-po-page__download"
-                  >
-                    Download
-                  </a>
-                </>
-              ) : null}
-            </p>
-          ) : null}
-          {record.po ? (
-            <button
-              type="button"
-              className="btn btn-ghost quote-po-page__clear"
-              onClick={() => handleClearPo()}
-            >
-              Clear PO
-            </button>
-          ) : null}
-        </div>
-      ) : null}
-
-      {match !== 'matched' ? (
-        <div className="quote-po-page__compare-row">
+      <div className="quote-po-page__upload">
+        <label className="field">
+          <span className="field__label">Upload PO (PDF or Excel)</span>
+          <input
+            type="file"
+            accept=".pdf,.xlsx,.xls,.csv,image/*"
+            className="field__control"
+            onChange={(e) => {
+              const file = e.currentTarget.files?.[0] ?? null
+              e.currentTarget.value = ''
+              void handlePoFile(file)
+            }}
+          />
+        </label>
+        {record.po?.fileName ? (
+          <p className="muted">
+            Current file: <strong>{record.po.fileName}</strong> (
+            {new Date(record.po.uploadedAt).toLocaleString()})
+            {record.po.dataBase64 ? (
+              <>
+                {' '}
+                <a
+                  href={record.po.dataBase64}
+                  download={record.po.fileName}
+                  className="quote-po-page__download"
+                >
+                  Download
+                </a>
+              </>
+            ) : null}
+            {record.po.customerPoNumber?.trim() ? (
+              <>
+                {' '}
+                · PO #: <strong>{record.po.customerPoNumber.trim()}</strong>
+              </>
+            ) : null}
+          </p>
+        ) : null}
+        {record.po ? (
           <button
             type="button"
-            className="btn btn-primary"
-            disabled={!hasPoAttachment || comparing}
-            onClick={() => void handleCompareTotals()}
+            className="btn btn-ghost quote-po-page__clear"
+            onClick={() => handleClearPo()}
           >
-            {comparing ? 'Reading PO…' : 'Compare totals'}
+            Clear PO
           </button>
-        </div>
-      ) : null}
-
-      <h3 className="quote-po-page__comparison-title">Result</h3>
-      <div
-        className={
-          match === 'matched'
-            ? 'quote-po-page__match quote-po-page__match--ok'
-            : match === 'mismatch'
-              ? 'quote-po-page__match quote-po-page__match--bad'
-              : 'quote-po-page__match'
-        }
-      >
-        {match === 'none' && <span className="muted">—</span>}
-        {match === 'matched' && (
-          <div className="quote-po-page__match-copy">
-            <p className="quote-po-page__match-lead">
-              <strong>Match</strong> — PO total matches quote grand total.
-            </p>
-            <div className="quote-po-page__match-detail">
-              {record.po?.customerPoNumber?.trim() ? (
-                <p>
-                  <strong>Customer PO number:</strong>{' '}
-                  {record.po.customerPoNumber.trim()}
-                </p>
-              ) : null}
-              <p>
-                <strong>PO total:</strong>{' '}
-                {formatPoTotalDisplay(record.po?.poTotalInr)} INR
-              </p>
-              <p>
-                <strong>Quote grand total:</strong> {formatInr(quoteTotal)} INR
-              </p>
-            </div>
-          </div>
-        )}
-        {match === 'mismatch' && (
-          <div className="quote-po-page__match-copy">
-            <p className="quote-po-page__match-lead">
-              <strong>No match</strong> — PO total and quote grand total differ.
-            </p>
-            <div className="quote-po-page__match-detail">
-              <p>
-                <strong>PO total:</strong>{' '}
-                {formatPoTotalDisplay(record.po?.poTotalInr)} INR
-              </p>
-              <p>
-                <strong>Quote grand total:</strong> {formatInr(quoteTotal)} INR
-              </p>
-            </div>
-          </div>
-        )}
+        ) : null}
       </div>
 
       {saveMsg ? (
@@ -393,7 +256,7 @@ export function QuotePoPanel({
         </p>
       ) : null}
 
-      {match === 'matched' ? (
+      {hasPoAttachment ? (
         <div className="quote-po-page__ovf">
           <h3 className="quote-po-page__ovf-title">Next steps</h3>
           {invoicePath ? (
@@ -428,8 +291,6 @@ export function QuotePoPanel({
                         )
                         onPersisted?.()
                       } else {
-                        // Fallback: some older rows may not have initialized `poFinanceReview`.
-                        // Force-create the pending state so it reaches Finance.
                         const now = new Date().toISOString()
                         const forced =
                           mergePoFinanceReviewOnRecord(quoteId, {
@@ -438,10 +299,10 @@ export function QuotePoPanel({
                             financeRejectionNote: undefined,
                           }) ??
                           upsertPoFinanceReviewOnRecord(quoteId, {
-                          workflowStatus: 'pending_finance',
-                          submittedToFinanceAt: now,
-                          financeRejectionNote: undefined,
-                        })
+                            workflowStatus: 'pending_finance',
+                            submittedToFinanceAt: now,
+                            financeRejectionNote: undefined,
+                          })
                         if (forced) {
                           setRecord(forced)
                           setSaveMsg(
@@ -498,7 +359,7 @@ type QuoteDetailsPreviewModalProps = {
   onClose: () => void
 }
 
-/** Eye icon on Sales overview: read-only quote snapshot (not PO upload/compare). */
+/** Eye icon on Sales overview: read-only quote snapshot (not PO upload). */
 export function QuoteDetailsPreviewModal({
   quoteId,
   onClose,
